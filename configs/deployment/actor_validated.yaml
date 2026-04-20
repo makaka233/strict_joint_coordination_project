@@ -1,0 +1,14 @@
+epochs: 80
+steps_per_epoch: 80
+batch_size: 32
+lr: 0.0005
+hidden: 64
+candidate_count: 10
+short_eval_every_steps: 80
+short_eval_episodes: 8
+log_every_steps: 20
+plot_every_steps: 80
+entropy_floor: 0.02
+entropy_coef: 0.003
+stay_coef: 0.25
+bc_anchor_steps: 1600

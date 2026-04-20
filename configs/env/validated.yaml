@@ -1,0 +1,25 @@
+seed: 5
+num_nodes: 4
+service_stages: [2, 2, 2]
+stage_memory_base: 8.0
+stage_storage_base: 10.0
+node_memory: 48.0
+node_storage: 64.0
+node_compute: 120.0
+bandwidth: 32.0
+scheduler_num_tasks: 24
+macro_demand_base: 14.0
+macro_demand_volatility: 5.0
+compute_base: 18.0
+data_base: 6.0
+max_replicas: 3
+deployment_candidate_topk: 4
+deployment_replica_min: 1
+deployment_replica_ratio_2: 1.00
+deployment_replica_ratio_3: 1.35
+deployment_extra_replica_prob: 0.10
+deployment_demand_weight: 1.0
+deployment_compute_weight: 0.25
+deployment_resource_weight: 0.35
+deployment_diversity_bias: 0.10
+deployment_noise: 0.04

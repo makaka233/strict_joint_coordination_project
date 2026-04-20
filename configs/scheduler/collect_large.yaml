@@ -1,0 +1,6 @@
+episodes: 8000
+heuristic_prob: 0.35
+random_prob: 0.30
+mutate_prob: 0.35
+mutation_prob: 0.22
+log_every_steps: 200
