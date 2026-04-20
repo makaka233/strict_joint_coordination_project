@@ -1,0 +1,50 @@
+cycles: 10
+rollout_episodes: 24
+
+# Keep scheduler on the faster timescale, but leave more budget for deployment.
+scheduler_blocks_per_cycle: 2
+scheduler_rollout_episodes: 24
+scheduler_inner_steps: 120
+scheduler_batch_size: 128
+scheduler_lr: 0.00012
+scheduler_lr_scale: 1.0
+scheduler_anchor_coef: 0.0002
+
+# Stronger response adaptation so deployment labels reflect a scheduler that can react.
+response_scheduler_inner_steps: 28
+response_scheduler_batch_size: 128
+response_scheduler_lr_scale: 0.35
+response_scheduler_anchor_coef: 0.0006
+
+# Give deployment more chances and more support to move.
+deployment_inner_steps: 36
+deployment_batch_size: 64
+deployment_lr: 0.00006
+deployment_lr_scale: 1.0
+deployment_anchor_coef: 0.0001
+deployment_update_interval: 1
+deployment_rollout_episodes: 16
+candidate_count: 16
+deployment_candidate_count: 16
+deployment_response_topk: 5
+
+scheduler_temp: 0.32
+scheduler_entropy_coef: 0.004
+scheduler_regret_coef: 0.7
+deployment_stay_coef: 0.18
+deployment_switch_coef: 0.05
+deployment_switch_penalty: 0.04
+deployment_frozen_latency_weight: 0.20
+deployment_response_latency_weight: 0.80
+deployment_gain_floor: 0.0
+
+eval_episodes: 32
+fixed_seed_base: 65432
+fixed_seed_count: 12
+
+# Lean more toward mean latency / reward while still keeping tails in view.
+accept_mean_weight: 1.0
+accept_p90_weight: 0.20
+accept_worst_weight: 0.04
+accept_reward_weight: 0.10
+accept_gain_floor: 0.0

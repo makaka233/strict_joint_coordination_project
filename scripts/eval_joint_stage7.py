@@ -65,7 +65,13 @@ def main():
     plot_lines(out_path, 'episode', ['mean_window_latency'], 'outputs/figures/stage7_joint_eval_latency.png', 'Stage7 joint eval latency', ma_window=3)
     plot_lines(out_path, 'episode', ['total_reward'], 'outputs/figures/stage7_joint_eval_reward.png', 'Stage7 joint eval reward', ma_window=3)
     lats = [r['mean_window_latency'] for r in rows]
-    print({'mean_latency': float(np.mean(lats)), 'p90_latency': quantile(lats, 0.90), 'worst_latency': float(np.max(lats))})
+    rewards = [r['total_reward'] for r in rows]
+    print({
+        'mean_latency': float(np.mean(lats)),
+        'p90_latency': quantile(lats, 0.90),
+        'worst_latency': float(np.max(lats)),
+        'mean_reward': float(np.mean(rewards)),
+    })
 
 
 if __name__ == '__main__':
