@@ -1,0 +1,83 @@
+{
+  "baseline": {
+    "mean_latency": 597.130677398548,
+    "p90_latency": 705.2089702465798,
+    "worst_latency": 934.6351823605271,
+    "mean_reward": -597.130677398548,
+    "deployment_density": 0.31829427427146584,
+    "deployment_switch_proxy": 0.43105468549765646,
+    "episodes": 256,
+    "seed_base": 80000,
+    "seed_count": 4,
+    "best_stage6_short_eval_latency": 565.5723032376899
+  },
+  "planner": {
+    "mean_latency": 607.5416190845111,
+    "p90_latency": 722.1437086718491,
+    "worst_latency": 922.5653581066356,
+    "mean_reward": -607.5416190845111,
+    "deployment_density": 0.32070312777068466,
+    "deployment_switch_proxy": 0.43567708134651184,
+    "episodes": 256,
+    "seed_base": 80000,
+    "seed_count": 4,
+    "best_stage6_short_eval_latency": 565.358776442652
+  },
+  "comparison": {
+    "best_stage6_short_eval_latency": {
+      "metric": "best_stage6_short_eval_latency",
+      "baseline": 565.5723032376899,
+      "planner": 565.358776442652,
+      "absolute_delta": -0.21352679503786476,
+      "relative_improvement": 0.0003775411098024138
+    },
+    "mean_latency": {
+      "metric": "mean_latency",
+      "baseline": 597.130677398548,
+      "planner": 607.5416190845111,
+      "absolute_delta": 10.410941685963166,
+      "relative_improvement": -0.01743494695552964
+    },
+    "p90_latency": {
+      "metric": "p90_latency",
+      "baseline": 705.2089702465798,
+      "planner": 722.1437086718491,
+      "absolute_delta": 16.934738425269302,
+      "relative_improvement": -0.02401378760021726
+    },
+    "worst_latency": {
+      "metric": "worst_latency",
+      "baseline": 934.6351823605271,
+      "planner": 922.5653581066356,
+      "absolute_delta": -12.069824253891511,
+      "relative_improvement": 0.012913941697987232
+    },
+    "mean_reward": {
+      "metric": "mean_reward",
+      "baseline": -597.130677398548,
+      "planner": -607.5416190845111,
+      "absolute_delta": -10.410941685963166,
+      "relative_improvement": -0.01743494695552964
+    },
+    "deployment_density": {
+      "metric": "deployment_density",
+      "baseline": 0.31829427427146584,
+      "planner": 0.32070312777068466,
+      "absolute_delta": 0.0024088534992188215,
+      "relative_improvement": 0.007568007639258902
+    },
+    "deployment_switch_proxy": {
+      "metric": "deployment_switch_proxy",
+      "baseline": 0.43105468549765646,
+      "planner": 0.43567708134651184,
+      "absolute_delta": 0.004622395848855376,
+      "relative_improvement": -0.010723455757170994
+    }
+  },
+  "artifacts": {
+    "baseline_checkpoint": "outputs\\eval\\large_compare\\deployment_actor_off.pt",
+    "planner_checkpoint": "outputs\\eval\\large_compare\\deployment_actor_planner.pt",
+    "baseline_eval_csv": "outputs\\eval\\large_compare\\full_eval_off.csv",
+    "planner_eval_csv": "outputs\\eval\\large_compare\\full_eval_planner.csv"
+  }
+}

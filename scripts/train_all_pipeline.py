@@ -49,13 +49,13 @@ def main():
         _run([args.python, 'scripts/train_scheduler_actor.py', '--env-config', args.train_env_config, '--actor-config', args.scheduler_actor_config, '--wm-checkpoint', 'outputs/scheduler_wm/best.pt', '--replay', 'outputs/scheduler_data/replay.pt', '--out', 'outputs/scheduler_actor/best.pt', *common_dev])
     print('='*80); print('Stage 4/7 - Collecting deployment data'); print('='*80)
     if not args.reuse_existing or not (PROJECT_ROOT / 'outputs/deployment_data/replay.pt').exists():
-        _run([args.python, 'scripts/collect_deployment_data.py', '--env-config', args.train_env_config, '--scheduler-checkpoint', 'outputs/scheduler_actor/best.pt', '--out', 'outputs/deployment_data/replay.pt', '--episodes', str(args.deployment_data_episodes), *common_dev])
+        _run([args.python, 'scripts/collect_deployment_data.py', '--env-config', args.train_env_config, '--deployment-actor-config', args.deployment_actor_config, '--scheduler-checkpoint', 'outputs/scheduler_actor/best.pt', '--out', 'outputs/deployment_data/replay.pt', '--episodes', str(args.deployment_data_episodes), *common_dev])
     print('='*80); print('Stage 5/7 - Training deployment world model'); print('='*80)
     if not args.reuse_existing or not (PROJECT_ROOT / 'outputs/deployment_wm/best.pt').exists():
         _run([args.python, 'scripts/train_deployment_wm.py', '--env-config', args.train_env_config, '--wm-config', args.deployment_wm_config, '--replay', 'outputs/deployment_data/replay.pt', '--out', 'outputs/deployment_wm/best.pt', *common_dev])
     print('='*80); print('Stage 6/7 - Training deployment actor'); print('='*80)
     if not args.reuse_existing or not (PROJECT_ROOT / 'outputs/deployment_actor/best.pt').exists():
-        _run([args.python, 'scripts/train_deployment_actor.py', '--env-config', args.train_env_config, '--actor-config', args.deployment_actor_config, '--wm-checkpoint', 'outputs/deployment_wm/best.pt', '--scheduler-checkpoint', 'outputs/scheduler_actor/best.pt', '--replay', 'outputs/deployment_data/replay.pt', '--out', 'outputs/deployment_actor/best.pt', *common_dev])
+        _run([args.python, 'scripts/train_deployment_actor.py', '--env-config', args.train_env_config, '--actor-config', args.deployment_actor_config, '--wm-checkpoint', 'outputs/deployment_wm/best.pt', '--deployment-wm-mode', 'planner', '--scheduler-checkpoint', 'outputs/scheduler_actor/best.pt', '--replay', 'outputs/deployment_data/replay.pt', '--out', 'outputs/deployment_actor/best.pt', *common_dev])
     sched_ckpt = 'outputs/scheduler_actor/best.pt'
     dep_ckpt = 'outputs/deployment_actor/best.pt'
     if args.joint_stage7_config and not args.skip_joint_stage7:

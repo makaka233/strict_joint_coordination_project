@@ -1,0 +1,17 @@
+epochs: 2
+steps_per_epoch: 4
+batch_size: 4
+lr: 0.0005
+hidden: 32
+candidate_count: 6
+wm_candidate_samples: 2
+wm_loss_weight: 0.70
+wm_gain_floor: 0.02
+short_eval_every_steps: 4
+short_eval_episodes: 2
+log_every_steps: 2
+plot_every_steps: 4
+entropy_floor: 0.02
+entropy_coef: 0.003
+stay_coef: 0.25
+bc_anchor_steps: 4

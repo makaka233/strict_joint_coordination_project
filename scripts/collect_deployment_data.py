@@ -30,9 +30,31 @@ def mutate(x, scn, cfg, rng):
     return repair_deployment(y, scn, int(cfg['max_replicas']), scores=rng.random(y.shape).astype(np.float32))
 
 
+def build_candidate_pool(macro, scn, env_cfg, candidate_count: int, rng: np.random.Generator):
+    current = greedy_direct_deployment(macro, scn, int(env_cfg['max_replicas']))
+    candidates = [current]
+    heuristic = greedy_direct_deployment(macro, scn, int(env_cfg['max_replicas']))
+    candidates.append(heuristic)
+    for _ in range(max(1, candidate_count // 4)):
+        candidates.append(mutate(current, scn, env_cfg, rng))
+        candidates.append(mutate(heuristic, scn, env_cfg, rng))
+        rnd = random_feasible(scn, env_cfg, rng)
+        candidates.append(rnd)
+        candidates.append(mutate(rnd, scn, env_cfg, rng))
+    uniq = []
+    seen = set()
+    for cand in candidates:
+        key = tuple(cand.reshape(-1).astype(int).tolist())
+        if key not in seen:
+            seen.add(key)
+            uniq.append(cand)
+    return current, uniq[:candidate_count]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--env-config', required=True)
+    ap.add_argument('--deployment-actor-config', required=True)
     ap.add_argument('--scheduler-checkpoint', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--episodes', type=int, default=1200)
@@ -40,6 +62,7 @@ def main():
     ap.add_argument('--gpu-id', type=int, default=2)
     args = ap.parse_args()
     env_cfg = load_yaml(args.env_config)
+    actor_cfg = load_yaml(args.deployment_actor_config)
     set_seed(int(env_cfg['seed']))
     rng = np.random.default_rng(int(env_cfg['seed']))
     device = resolve_device(args.device, args.gpu_id)
@@ -48,34 +71,15 @@ def main():
     dummy_macro = generate_macro_obs(scn, env_cfg, rng)
     dummy_dep = greedy_direct_deployment(dummy_macro, scn, int(env_cfg['max_replicas']))
     from src.env.core import make_scheduler_obs
-    t = {'origin': 0, 'service': 0, 'stage_compute': [1.0]*scn.service_stages[0], 'stage_data':[1.0]*scn.service_stages[0]}
+    t = {'origin': 0, 'service': 0, 'stage_compute': [1.0]*scn.service_stages[0], 'stage_data': [1.0]*scn.service_stages[0]}
     obs_dim = make_scheduler_obs(t, 0, 0, dummy_dep, dummy_macro, scn, np.zeros(scn.num_nodes, dtype=np.float32)).shape[0]
     scheduler = load_scheduler_policy(args.scheduler_checkpoint, obs_dim, scn.num_nodes, device=device)
     replay = []
     log = MetricLogger('outputs/metrics/stage4_deployment_collect.csv', 'outputs/logs/stage4_deployment_collect.jsonl')
-    candidate_count = int(load_yaml(PROJECT_ROOT / 'configs/deployment/actor_large.yaml').get('candidate_count', 8)) if (PROJECT_ROOT / 'configs/deployment/actor_large.yaml').exists() else 8
+    candidate_count = int(actor_cfg.get('candidate_count', 8))
     for ep in range(args.episodes):
         macro = generate_macro_obs(scn, env_cfg, rng)
-        current = greedy_direct_deployment(macro, scn, int(env_cfg['max_replicas']))
-        candidates = [current]
-        # richer candidate pool: heuristic / mutate / random / mutate-random
-        heuristic = greedy_direct_deployment(macro, scn, int(env_cfg['max_replicas']))
-        candidates.append(heuristic)
-        for _ in range(max(1, candidate_count // 4)):
-            candidates.append(mutate(current, scn, env_cfg, rng))
-            candidates.append(mutate(heuristic, scn, env_cfg, rng))
-            rnd = random_feasible(scn, env_cfg, rng)
-            candidates.append(rnd)
-            candidates.append(mutate(rnd, scn, env_cfg, rng))
-        # dedupe and trim
-        uniq = []
-        seen = set()
-        for cand in candidates:
-            key = tuple(cand.reshape(-1).astype(int).tolist())
-            if key not in seen:
-                seen.add(key)
-                uniq.append(cand)
-        candidates = uniq[:candidate_count]
+        current, candidates = build_candidate_pool(macro, scn, env_cfg, candidate_count, rng)
         vals = []
         rewards = []
         for cand in candidates:
@@ -88,6 +92,9 @@ def main():
         current_reward = float(rewards[0])
         best_reward = float(rewards[best_idx])
         rel_gain = float((current_latency - best_latency) / max(current_latency, 1e-6))
+        candidate_xs = np.stack([cand.reshape(-1).astype(np.float32) for cand in candidates]).astype(np.float32)
+        candidate_latencies = np.asarray(vals, dtype=np.float32)
+        candidate_latency_norms = np.log1p(candidate_latencies).astype(np.float32)
         replay.append({
             'macro_obs': flatten_macro_obs(macro),
             'x_label': candidates[best_idx].astype(np.float32),
@@ -100,6 +107,11 @@ def main():
             'current_reward': current_reward,
             'relative_gain': rel_gain,
             'switch_cost_est': float(np.mean(np.abs(candidates[best_idx] - current))),
+            'candidate_xs': candidate_xs,
+            'candidate_latencies': candidate_latencies,
+            'candidate_latency_norms': candidate_latency_norms,
+            'best_candidate_idx': best_idx,
+            'current_candidate_idx': 0,
             'candidate_count': len(candidates),
         })
         if (ep + 1) % 10 == 0:
@@ -121,6 +133,7 @@ def main():
     torch.save(replay, args.out)
     log.close()
     print(f'Saved deployment replay to {args.out}')
+
 
 if __name__ == '__main__':
     main()

@@ -1,0 +1,8 @@
+epochs: 2
+steps_per_epoch: 4
+batch_size: 4
+lr: 0.0005
+hidden: 32
+log_every_steps: 2
+plot_every_steps: 4
+holdout_fraction: 0.25

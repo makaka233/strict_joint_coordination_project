@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-import argparse, csv
+import argparse, csv, json
 import numpy as np
 from src.common.config import load_yaml
 from src.common.seed import set_seed
@@ -13,6 +13,10 @@ from src.env.core import build_scenario, generate_macro_obs, flatten_macro_obs, 
 from scripts._shared import load_scheduler_policy, load_deployment_policy
 
 
+def quantile(vals, q):
+    return float(np.quantile(np.asarray(vals, dtype=np.float64), q)) if vals else 0.0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--env-config', required=True)
@@ -20,6 +24,9 @@ def main():
     ap.add_argument('--deployment-checkpoint', required=True)
     ap.add_argument('--episodes', type=int, default=64)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--seed-base', type=int, default=None)
+    ap.add_argument('--seed-count', type=int, default=1)
+    ap.add_argument('--summary-out', default='')
     ap.add_argument('--device', default='auto')
     ap.add_argument('--gpu-id', type=int, default=2)
     args = ap.parse_args()
@@ -31,36 +38,66 @@ def main():
     rng = np.random.default_rng(int(env_cfg['seed']) + 999)
     dummy_macro = generate_macro_obs(scn, env_cfg, rng)
     dummy_dep = greedy_direct_deployment(dummy_macro, scn, int(env_cfg['max_replicas']))
-    t = {'origin': 0, 'service': 0, 'stage_compute': [1.0]*scn.service_stages[0], 'stage_data':[1.0]*scn.service_stages[0]}
+    t = {'origin': 0, 'service': 0, 'stage_compute': [1.0]*scn.service_stages[0], 'stage_data': [1.0]*scn.service_stages[0]}
     sched_obs_dim = make_scheduler_obs(t, 0, 0, dummy_dep, dummy_macro, scn, np.zeros(scn.num_nodes, dtype=np.float32)).shape[0]
     scheduler = load_scheduler_policy(args.scheduler_checkpoint, sched_obs_dim, scn.num_nodes, device=device)
     dep_obs_dim = flatten_macro_obs(dummy_macro).shape[0]
     dep_num_outputs = stage_count(scn) * scn.num_nodes
     deployer = load_deployment_policy(args.deployment_checkpoint, dep_obs_dim, dep_num_outputs, device=device)
     rows = []
-    for ep in range(args.episodes):
-        macro = generate_macro_obs(scn, env_cfg, rng)
-        dep = deployer.act(flatten_macro_obs(macro), scn, int(env_cfg['max_replicas']))
-        out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: scheduler.act(obs, mask))
-        rows.append({
-            'episode': ep,
-            'total_reward': out['total_reward'],
-            'mean_window_latency': out['mean_window_latency'],
-            'num_tasks': out['num_tasks'],
-            'deployment_density': float(dep.mean()),
-            'deployment_switch_proxy': float(np.mean(dep != dummy_dep))
-        })
-        if (ep + 1) % 10 == 0:
-            print({'episode': ep + 1, 'mean_window_latency': out['mean_window_latency']})
+    seed_base = args.seed_base if args.seed_base is not None else int(env_cfg['seed']) + 999
+    global_episode = 0
+    for seed_idx in range(int(args.seed_count)):
+        seed = int(seed_base + seed_idx)
+        rng = np.random.default_rng(seed)
+        prev_dep = dummy_dep.copy()
+        for ep in range(args.episodes):
+            macro = generate_macro_obs(scn, env_cfg, rng)
+            dep = deployer.act(flatten_macro_obs(macro), scn, int(env_cfg['max_replicas']))
+            out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: scheduler.act(obs, mask))
+            rows.append({
+                'seed': seed,
+                'seed_index': seed_idx,
+                'episode': ep,
+                'global_episode': global_episode,
+                'total_reward': out['total_reward'],
+                'mean_window_latency': out['mean_window_latency'],
+                'num_tasks': out['num_tasks'],
+                'deployment_density': float(dep.mean()),
+                'deployment_switch_proxy': float(np.mean(np.abs(dep - prev_dep))),
+            })
+            prev_dep = dep
+            global_episode += 1
+            if (ep + 1) % 10 == 0:
+                print({'seed': seed, 'episode': ep + 1, 'mean_window_latency': out['mean_window_latency']})
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader(); writer.writerows(rows)
-    plot_lines(str(out_path), 'episode', ['mean_window_latency'], 'outputs/figures/stage7_full_eval_latency.png', 'Stage7 full eval latency', ma_window=3)
-    plot_lines(str(out_path), 'episode', ['total_reward'], 'outputs/figures/stage7_full_eval_reward.png', 'Stage7 full eval reward', ma_window=3)
+        writer.writeheader()
+        writer.writerows(rows)
+    plot_lines(str(out_path), 'global_episode', ['mean_window_latency'], 'outputs/figures/stage7_full_eval_latency.png', 'Stage7 full eval latency', ma_window=3)
+    plot_lines(str(out_path), 'global_episode', ['total_reward'], 'outputs/figures/stage7_full_eval_reward.png', 'Stage7 full eval reward', ma_window=3)
     lats = [r['mean_window_latency'] for r in rows]
-    print({'mean_latency_avg': float(np.mean(lats)), 'mean_latency_std': float(np.std(lats, ddof=1)) if len(lats) > 1 else 0.0})
+    rewards = [r['total_reward'] for r in rows]
+    summary = {
+        'mean_latency': float(np.mean(lats)) if lats else 0.0,
+        'p90_latency': quantile(lats, 0.90),
+        'worst_latency': float(np.max(lats)) if lats else 0.0,
+        'mean_reward': float(np.mean(rewards)) if rewards else 0.0,
+        'deployment_density': float(np.mean([r['deployment_density'] for r in rows])) if rows else 0.0,
+        'deployment_switch_proxy': float(np.mean([r['deployment_switch_proxy'] for r in rows])) if rows else 0.0,
+        'episodes': int(len(rows)),
+        'seed_base': int(seed_base),
+        'seed_count': int(args.seed_count),
+    }
+    if args.summary_out:
+        summary_path = Path(args.summary_out)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(summary)
+
 
 if __name__ == '__main__':
     main()

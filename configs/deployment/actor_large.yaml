@@ -4,6 +4,9 @@ batch_size: 64
 lr: 0.0002
 hidden: 128
 candidate_count: 12
+wm_candidate_samples: 3
+wm_loss_weight: 0.70
+wm_gain_floor: 0.02
 short_eval_every_steps: 200
 short_eval_episodes: 12
 log_every_steps: 20

@@ -1,0 +1,83 @@
+{
+  "baseline": {
+    "mean_latency": 278.3200082352346,
+    "p90_latency": 318.6271584652509,
+    "worst_latency": 331.8416010438106,
+    "mean_reward": -278.32000823523447,
+    "deployment_density": 0.5520833432674408,
+    "deployment_switch_proxy": 0.3125,
+    "episodes": 4,
+    "seed_base": 71000,
+    "seed_count": 2,
+    "best_stage6_short_eval_latency": 184.04284143295607
+  },
+  "planner": {
+    "mean_latency": 278.3200082352346,
+    "p90_latency": 318.6271584652509,
+    "worst_latency": 331.8416010438106,
+    "mean_reward": -278.32000823523447,
+    "deployment_density": 0.5520833432674408,
+    "deployment_switch_proxy": 0.3125,
+    "episodes": 4,
+    "seed_base": 71000,
+    "seed_count": 2,
+    "best_stage6_short_eval_latency": 184.04284143295607
+  },
+  "comparison": {
+    "best_stage6_short_eval_latency": {
+      "metric": "best_stage6_short_eval_latency",
+      "baseline": 184.04284143295607,
+      "planner": 184.04284143295607,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "mean_latency": {
+      "metric": "mean_latency",
+      "baseline": 278.3200082352346,
+      "planner": 278.3200082352346,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "p90_latency": {
+      "metric": "p90_latency",
+      "baseline": 318.6271584652509,
+      "planner": 318.6271584652509,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "worst_latency": {
+      "metric": "worst_latency",
+      "baseline": 331.8416010438106,
+      "planner": 331.8416010438106,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "mean_reward": {
+      "metric": "mean_reward",
+      "baseline": -278.32000823523447,
+      "planner": -278.32000823523447,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "deployment_density": {
+      "metric": "deployment_density",
+      "baseline": 0.5520833432674408,
+      "planner": 0.5520833432674408,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    },
+    "deployment_switch_proxy": {
+      "metric": "deployment_switch_proxy",
+      "baseline": 0.3125,
+      "planner": 0.3125,
+      "absolute_delta": 0.0,
+      "relative_improvement": 0.0
+    }
+  },
+  "artifacts": {
+    "baseline_checkpoint": "outputs\\eval\\smoke_compare\\deployment_actor_off.pt",
+    "planner_checkpoint": "outputs\\eval\\smoke_compare\\deployment_actor_planner.pt",
+    "baseline_eval_csv": "outputs\\eval\\smoke_compare\\full_eval_off.csv",
+    "planner_eval_csv": "outputs\\eval\\smoke_compare\\full_eval_planner.csv"
+  }
+}

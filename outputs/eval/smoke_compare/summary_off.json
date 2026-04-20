@@ -1,0 +1,11 @@
+{
+  "mean_latency": 278.3200082352346,
+  "p90_latency": 318.6271584652509,
+  "worst_latency": 331.8416010438106,
+  "mean_reward": -278.32000823523447,
+  "deployment_density": 0.5520833432674408,
+  "deployment_switch_proxy": 0.3125,
+  "episodes": 4,
+  "seed_base": 71000,
+  "seed_count": 2
+}
