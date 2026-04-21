@@ -1,0 +1,72 @@
+cycles: 10
+rollout_episodes: 24
+
+# Shift the training mix from scheduler-heavy toward deployment-heavy over time.
+scheduler_blocks_per_cycle_start: 2
+scheduler_blocks_per_cycle_end: 1
+scheduler_rollout_episodes: 24
+scheduler_inner_steps: 120
+scheduler_batch_size: 128
+scheduler_lr: 0.00012
+scheduler_lr_scale: 1.0
+scheduler_anchor_coef: 0.0002
+
+# Make the response model stronger later in training so deployment labels are less myopic.
+response_scheduler_inner_steps_start: 28
+response_scheduler_inner_steps_end: 36
+response_scheduler_batch_size: 128
+response_scheduler_lr_scale_start: 0.35
+response_scheduler_lr_scale_end: 0.45
+response_scheduler_anchor_coef: 0.0005
+
+# Keep deployment on the slow timescale, but let its budget and search width grow.
+deployment_inner_steps: 40
+deployment_batch_size: 64
+deployment_lr: 0.00006
+deployment_lr_scale_start: 1.0
+deployment_lr_scale_end: 1.10
+deployment_anchor_coef_start: 0.00010
+deployment_anchor_coef_end: 0.00005
+deployment_update_interval: 1
+deployment_rollout_episodes_start: 16
+deployment_rollout_episodes_end: 24
+candidate_count: 16
+deployment_candidate_count_start: 16
+deployment_candidate_count_end: 20
+deployment_response_topk_start: 5
+deployment_response_topk_end: 6
+deployment_sample_buffer_size: 240
+deployment_min_buffer_size: 32
+
+# If deployment moves are promising, let scheduler do a short on-policy catch-up before acceptance.
+deployment_accept_scheduler_blocks_start: 1
+deployment_accept_scheduler_blocks_end: 2
+deployment_accept_scheduler_rollout_episodes_start: 12
+deployment_accept_scheduler_rollout_episodes_end: 16
+deployment_accept_scheduler_inner_steps_start: 80
+deployment_accept_scheduler_inner_steps_end: 120
+deployment_accept_scheduler_batch_size: 128
+deployment_accept_scheduler_lr_scale_start: 0.60
+deployment_accept_scheduler_lr_scale_end: 0.75
+deployment_accept_scheduler_anchor_coef: 0.0004
+
+scheduler_temp: 0.32
+scheduler_entropy_coef: 0.004
+scheduler_regret_coef: 0.7
+deployment_stay_coef: 0.16
+deployment_switch_coef: 0.05
+deployment_switch_penalty_start: 0.040
+deployment_switch_penalty_end: 0.030
+deployment_frozen_latency_weight: 0.15
+deployment_response_latency_weight: 0.85
+deployment_gain_floor: 0.0
+
+eval_episodes: 32
+fixed_seed_base: 65432
+fixed_seed_count: 12
+
+accept_mean_weight: 1.0
+accept_p90_weight: 0.18
+accept_worst_weight: 0.03
+accept_reward_weight: 0.12
+accept_gain_floor: 0.0

@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 
+from src.joint.stage7 import SampleBuffer, resolve_cycle_value
 from scripts.train_joint_stage7 import (
     compute_candidate_objective,
     compute_joint_score,
@@ -58,6 +59,19 @@ class JointStage7DualTimescaleTests(unittest.TestCase):
             cfg=cfg,
         )
         self.assertLess(stable_candidate, brittle_candidate)
+
+    def test_resolve_cycle_value_interpolates_int_schedule(self):
+        cfg = {'deployment_rollout_episodes_start': 8, 'deployment_rollout_episodes_end': 20}
+        self.assertEqual(resolve_cycle_value(cfg, 'deployment_rollout_episodes', 0.0, 8, as_int=True), 8)
+        self.assertEqual(resolve_cycle_value(cfg, 'deployment_rollout_episodes', 1.0, 8, as_int=True), 20)
+        self.assertEqual(resolve_cycle_value(cfg, 'deployment_rollout_episodes', 0.5, 8, as_int=True), 14)
+
+    def test_sample_buffer_keeps_recent_rows(self):
+        buf = SampleBuffer(max_size=3)
+        buf.extend([{'id': 1}, {'id': 2}])
+        buf.extend([{'id': 3}, {'id': 4}])
+        self.assertEqual(len(buf), 3)
+        self.assertEqual([row['id'] for row in buf.snapshot()], [2, 3, 4])
 
 
 if __name__ == '__main__':

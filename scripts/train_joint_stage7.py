@@ -24,24 +24,14 @@ from src.env.core import (
 )
 from src.agents.scheduler.policy import SchedulerPolicy
 from src.agents.deployment.policy import DeploymentPolicy
+from src.joint.stage7 import (
+    SampleBuffer,
+    average_scalar_dicts,
+    compute_joint_score,
+    quantile,
+    resolve_cycle_value,
+)
 from scripts._shared import load_deployment_policy, load_scheduler_policy, save_checkpoint
-
-
-def quantile(vals: list[float], q: float) -> float:
-    if not vals:
-        return 0.0
-    arr = np.asarray(vals, dtype=np.float64)
-    return float(np.quantile(arr, q))
-
-
-def compute_joint_score(ev: dict, cfg: dict) -> float:
-    score = (
-        float(cfg.get('accept_mean_weight', 1.0)) * float(ev['mean_latency'])
-        + float(cfg.get('accept_p90_weight', 0.25)) * float(ev['p90_latency'])
-        + float(cfg.get('accept_worst_weight', 0.05)) * float(ev['worst_latency'])
-        - float(cfg.get('accept_reward_weight', 0.0)) * float(ev.get('mean_reward', 0.0))
-    )
-    return float(score)
 
 
 def materialize_deployment_vector(raw_vec: np.ndarray, score_vec: np.ndarray, scn, max_replicas: int) -> np.ndarray:
@@ -287,6 +277,56 @@ def train_scheduler_inner(
             'scheduler_anchor_loss': float(anchor_loss.item()),
         }
     return last
+
+
+def adapt_scheduler_after_deployment_update(
+    dep_pol: DeploymentPolicy,
+    sched_pol: SchedulerPolicy,
+    scn,
+    env_cfg: dict,
+    cfg: dict,
+    device: torch.device,
+    eval_eps: int,
+    seed_bank: list[int],
+    seed_base: int,
+    cycle: int,
+    sched_obs_dim: int,
+    initial_sched_state: dict[str, torch.Tensor],
+):
+    burst_blocks = int(cfg.get('deployment_accept_scheduler_blocks', 0))
+    if burst_blocks <= 0:
+        ev = eval_joint(dep_pol, sched_pol, scn, env_cfg, eval_eps, seed_bank)
+        return sched_pol, ev, {}, 0
+    adapted_sched = clone_scheduler_policy(sched_pol, sched_obs_dim, scn.num_nodes, device)
+    burst_stats = []
+    total_samples = 0
+    rollout_episodes = int(cfg.get('deployment_accept_scheduler_rollout_episodes', cfg.get('scheduler_rollout_episodes', cfg.get('rollout_episodes', 12))))
+    for burst_idx in range(burst_blocks):
+        samples = collect_scheduler_samples(
+            dep_pol,
+            adapted_sched,
+            scn,
+            env_cfg,
+            rollout_episodes,
+            seed_base + cycle * 67 + burst_idx * 13,
+            float(cfg.get('scheduler_temp', 0.35)),
+        )
+        total_samples += len(samples)
+        stats = train_scheduler_inner(
+            samples,
+            adapted_sched,
+            cfg,
+            device,
+            lr_scale=float(cfg.get('deployment_accept_scheduler_lr_scale', 1.0)),
+            anchor_state=initial_sched_state,
+            steps_key='deployment_accept_scheduler_inner_steps',
+            batch_key='deployment_accept_scheduler_batch_size',
+            lr_key='scheduler_lr',
+            anchor_coef_key='deployment_accept_scheduler_anchor_coef',
+        )
+        burst_stats.append(stats)
+    ev = eval_joint(dep_pol, adapted_sched, scn, env_cfg, eval_eps, seed_bank)
+    return adapted_sched, ev, average_scalar_dicts(burst_stats, prefix='deployment_accept_scheduler_'), total_samples
 
 
 def build_deployment_candidate_pool(
@@ -668,12 +708,34 @@ def main():
     maybe_save_best(out_dir, sched_pol, dep_pol, best_score, best_eval, sched_obs_dim, dep_obs_dim, dep_num_outputs, scn)
 
     cycles = int(cfg['cycles'])
-    scheduler_blocks = int(cfg.get('scheduler_blocks_per_cycle', 1))
-    scheduler_rollout_episodes = int(cfg.get('scheduler_rollout_episodes', cfg.get('rollout_episodes', 12)))
-    deployment_rollout_episodes = int(cfg.get('deployment_rollout_episodes', max(4, scheduler_rollout_episodes // 2)))
-    deployment_update_interval = int(cfg.get('deployment_update_interval', 1))
+    dep_buffer = SampleBuffer(int(cfg.get('deployment_sample_buffer_size', 128)))
+    deployment_min_buffer_size = int(cfg.get('deployment_min_buffer_size', 0))
 
     for cycle in range(1, cycles + 1):
+        progress = 0.0 if cycles <= 1 else float(cycle - 1) / float(cycles - 1)
+        cycle_cfg = dict(cfg)
+        cycle_cfg['scheduler_blocks_per_cycle'] = resolve_cycle_value(cfg, 'scheduler_blocks_per_cycle', progress, cfg.get('scheduler_blocks_per_cycle', 1), as_int=True)
+        cycle_cfg['scheduler_rollout_episodes'] = resolve_cycle_value(cfg, 'scheduler_rollout_episodes', progress, cfg.get('scheduler_rollout_episodes', cfg.get('rollout_episodes', 12)), as_int=True)
+        cycle_cfg['deployment_rollout_episodes'] = resolve_cycle_value(cfg, 'deployment_rollout_episodes', progress, cfg.get('deployment_rollout_episodes', max(4, int(cycle_cfg['scheduler_rollout_episodes']) // 2)), as_int=True)
+        cycle_cfg['deployment_update_interval'] = resolve_cycle_value(cfg, 'deployment_update_interval', progress, cfg.get('deployment_update_interval', 1), as_int=True)
+        cycle_cfg['deployment_candidate_count'] = resolve_cycle_value(cfg, 'deployment_candidate_count', progress, cfg.get('deployment_candidate_count', cfg.get('candidate_count', 8)), as_int=True)
+        cycle_cfg['deployment_response_topk'] = resolve_cycle_value(cfg, 'deployment_response_topk', progress, cfg.get('deployment_response_topk', min(3, int(cycle_cfg['deployment_candidate_count']))), as_int=True)
+        cycle_cfg['response_scheduler_inner_steps'] = resolve_cycle_value(cfg, 'response_scheduler_inner_steps', progress, cfg.get('response_scheduler_inner_steps', 12), as_int=True)
+        cycle_cfg['response_scheduler_lr_scale'] = resolve_cycle_value(cfg, 'response_scheduler_lr_scale', progress, cfg.get('response_scheduler_lr_scale', 0.35))
+        cycle_cfg['deployment_lr_scale'] = resolve_cycle_value(cfg, 'deployment_lr_scale', progress, cfg.get('deployment_lr_scale', 1.0))
+        cycle_cfg['deployment_switch_penalty'] = resolve_cycle_value(cfg, 'deployment_switch_penalty', progress, cfg.get('deployment_switch_penalty', 0.05))
+        cycle_cfg['deployment_anchor_coef'] = resolve_cycle_value(cfg, 'deployment_anchor_coef', progress, cfg.get('deployment_anchor_coef', 0.0))
+        cycle_cfg['deployment_accept_scheduler_blocks'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_blocks', progress, cfg.get('deployment_accept_scheduler_blocks', 0), as_int=True)
+        cycle_cfg['deployment_accept_scheduler_rollout_episodes'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_rollout_episodes', progress, cfg.get('deployment_accept_scheduler_rollout_episodes', int(cycle_cfg['scheduler_rollout_episodes'])), as_int=True)
+        cycle_cfg['deployment_accept_scheduler_inner_steps'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_inner_steps', progress, cfg.get('deployment_accept_scheduler_inner_steps', int(cfg.get('scheduler_inner_steps', 80))), as_int=True)
+        cycle_cfg['deployment_accept_scheduler_batch_size'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_batch_size', progress, cfg.get('deployment_accept_scheduler_batch_size', int(cfg.get('scheduler_batch_size', 128))), as_int=True)
+        cycle_cfg['deployment_accept_scheduler_lr_scale'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_lr_scale', progress, cfg.get('deployment_accept_scheduler_lr_scale', 1.0))
+        cycle_cfg['deployment_accept_scheduler_anchor_coef'] = resolve_cycle_value(cfg, 'deployment_accept_scheduler_anchor_coef', progress, cfg.get('deployment_accept_scheduler_anchor_coef', cfg.get('scheduler_anchor_coef', 0.0)))
+        scheduler_blocks = int(cycle_cfg['scheduler_blocks_per_cycle'])
+        scheduler_rollout_episodes = int(cycle_cfg['scheduler_rollout_episodes'])
+        deployment_rollout_episodes = int(cycle_cfg['deployment_rollout_episodes'])
+        deployment_update_interval = int(cycle_cfg['deployment_update_interval'])
+
         for block in range(scheduler_blocks):
             sched_samples = collect_scheduler_samples(
                 dep_pol,
@@ -687,13 +749,13 @@ def main():
             sched_stats = train_scheduler_inner(
                 sched_samples,
                 sched_pol,
-                cfg,
+                cycle_cfg,
                 device,
-                lr_scale=float(cfg.get('scheduler_lr_scale', 1.0)),
+                lr_scale=float(cycle_cfg.get('scheduler_lr_scale', 1.0)),
                 anchor_state=initial_sched_state,
             )
             trial_eval = eval_joint(dep_pol, sched_pol, scn, env_cfg, eval_eps, seed_bank)
-            trial_score = compute_joint_score(trial_eval, cfg)
+            trial_score = compute_joint_score(trial_eval, cycle_cfg)
             improved = float(trial_score + accept_gain_floor < current_score)
             if improved:
                 current_score = trial_score
@@ -720,6 +782,7 @@ def main():
                 'mean_reward_delta_vs_baseline': float(trial_eval['mean_reward'] - baseline_eval['mean_reward']),
                 'sched_sample_count': len(sched_samples),
                 'dep_sample_count': 0,
+                'dep_buffer_size': len(dep_buffer),
                 **sched_stats,
                 **trial_eval,
             }
@@ -727,38 +790,63 @@ def main():
             print(row)
 
         if cycle % deployment_update_interval == 0:
-            dep_samples, dep_collect_stats = collect_deployment_response_samples(
+            new_dep_samples, dep_collect_stats = collect_deployment_response_samples(
                 dep_pol,
                 sched_pol,
                 scn,
                 env_cfg,
-                cfg,
+                cycle_cfg,
                 device,
                 deployment_rollout_episodes,
                 seed_base + cycle * 29,
                 sched_obs_dim,
             )
+            dep_buffer.extend(new_dep_samples)
+            train_dep_samples = dep_buffer.snapshot() if len(dep_buffer) >= deployment_min_buffer_size else list(new_dep_samples)
             dep_stats = train_deployment_inner(
-                dep_samples,
+                train_dep_samples,
                 dep_pol,
-                cfg,
+                cycle_cfg,
                 device,
-                lr_scale=float(cfg.get('deployment_lr_scale', 1.0)),
+                lr_scale=float(cycle_cfg.get('deployment_lr_scale', 1.0)),
                 anchor_state=initial_dep_state,
             )
-            trial_eval = eval_joint(dep_pol, sched_pol, scn, env_cfg, eval_eps, seed_bank)
-            trial_score = compute_joint_score(trial_eval, cfg)
+            accept_sched_stats = {}
+            accept_sched_sample_count = 0
+            if int(cycle_cfg.get('deployment_accept_scheduler_blocks', 0)) > 0:
+                adapted_sched_pol, trial_eval, accept_sched_stats, accept_sched_sample_count = adapt_scheduler_after_deployment_update(
+                    dep_pol,
+                    sched_pol,
+                    scn,
+                    env_cfg,
+                    cycle_cfg,
+                    device,
+                    eval_eps,
+                    seed_bank,
+                    seed_base,
+                    cycle,
+                    sched_obs_dim,
+                    initial_sched_state,
+                )
+            else:
+                adapted_sched_pol = None
+                trial_eval = eval_joint(dep_pol, sched_pol, scn, env_cfg, eval_eps, seed_bank)
+            trial_score = compute_joint_score(trial_eval, cycle_cfg)
             improved = float(trial_score + accept_gain_floor < current_score)
             if improved:
                 current_score = trial_score
                 current_eval = dict(trial_eval)
                 current_dep_state = copy.deepcopy(dep_pol.model.state_dict())
+                if adapted_sched_pol is not None:
+                    sched_pol.model.load_state_dict(adapted_sched_pol.model.state_dict())
+                    current_sched_state = copy.deepcopy(sched_pol.model.state_dict())
                 if trial_score < best_score:
                     best_score = trial_score
                     best_eval = dict(trial_eval)
                     maybe_save_best(out_dir, sched_pol, dep_pol, best_score, best_eval, sched_obs_dim, dep_obs_dim, dep_num_outputs, scn)
             else:
                 dep_pol.model.load_state_dict(current_dep_state)
+                sched_pol.model.load_state_dict(current_sched_state)
             joint_step += 1
             row = {
                 'joint_step': joint_step,
@@ -772,10 +860,13 @@ def main():
                 'baseline_mean_reward': float(baseline_eval['mean_reward']),
                 'mean_latency_delta_vs_baseline': float(trial_eval['mean_latency'] - baseline_eval['mean_latency']),
                 'mean_reward_delta_vs_baseline': float(trial_eval['mean_reward'] - baseline_eval['mean_reward']),
-                'sched_sample_count': 0,
-                'dep_sample_count': len(dep_samples),
+                'sched_sample_count': int(accept_sched_sample_count),
+                'dep_sample_count': len(new_dep_samples),
+                'dep_train_sample_count': len(train_dep_samples),
+                'dep_buffer_size': len(dep_buffer),
                 **dep_collect_stats,
                 **dep_stats,
+                **accept_sched_stats,
                 **trial_eval,
             }
             logger.log(row)
@@ -794,6 +885,9 @@ def main():
             'baseline_mean_reward': float(baseline_eval['mean_reward']),
             'mean_latency_delta_vs_baseline': float(current_eval['mean_latency'] - baseline_eval['mean_latency']),
             'mean_reward_delta_vs_baseline': float(current_eval['mean_reward'] - baseline_eval['mean_reward']),
+            'dep_buffer_size': len(dep_buffer),
+            'scheduler_blocks_planned': scheduler_blocks,
+            'deployment_rollout_episodes_current': deployment_rollout_episodes,
             **current_eval,
         }
         logger.log(cycle_row)

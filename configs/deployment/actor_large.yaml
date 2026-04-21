@@ -1,5 +1,5 @@
-epochs: 160
-steps_per_epoch: 200
+epochs: 200
+steps_per_epoch: 250
 batch_size: 64
 lr: 0.0002
 hidden: 128
@@ -14,4 +14,4 @@ plot_every_steps: 200
 entropy_floor: 0.02
 entropy_coef: 0.003
 stay_coef: 0.25
-bc_anchor_steps: 6000
+bc_anchor_steps: 10000

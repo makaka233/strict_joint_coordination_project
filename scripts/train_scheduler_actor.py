@@ -310,13 +310,13 @@ def main():
                     logger.flush()
                     plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['actor_loss', 'plan_loss', 'expected_cost', 'relative_cost', 'margin_loss', 'entropy'], 'outputs/figures/stage3_scheduler_actor_train.png', 'Stage3 scheduler actor train', ma_window=50)
                     plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_latency_short', 'anchor_eval_latency'], 'outputs/figures/stage3_scheduler_actor_eval_latency.png', 'Stage3 scheduler eval latency', ma_window=5)
-                    plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['imag_return', 'eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
+                    plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
                     print({'best_eval_latency': best_latency, 'best_eval_score': best_score})
                     return
             if global_step % plot_every == 0:
                 plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['actor_loss', 'plan_loss', 'expected_cost', 'relative_cost', 'margin_loss', 'entropy'], 'outputs/figures/stage3_scheduler_actor_train.png', 'Stage3 scheduler actor train', ma_window=25)
                 plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_latency_short', 'anchor_eval_latency'], 'outputs/figures/stage3_scheduler_actor_eval_latency.png', 'Stage3 scheduler eval latency', ma_window=5)
-                plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['imag_return', 'eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
+                plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
     logger.flush()
     print({'best_eval_latency': best_latency, 'best_eval_score': best_score})
 

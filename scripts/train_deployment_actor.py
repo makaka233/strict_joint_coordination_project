@@ -299,7 +299,7 @@ def main():
             if global_step % int(cfg['plot_every_steps']) == 0:
                 plot_lines('outputs/metrics/stage6_deployment_actor.csv', 'global_step', ['actor_loss', 'bc_loss', 'wm_bc_loss', 'switch_cost'], 'outputs/figures/stage6_deployment_actor_train.png', 'Stage6 deployment actor train', ma_window=50)
                 plot_lines('outputs/metrics/stage6_deployment_actor.csv', 'global_step', ['eval_latency_short'], 'outputs/figures/stage6_deployment_actor_eval_latency.png', 'Stage6 deployment eval latency', ma_window=5)
-                plot_lines('outputs/metrics/stage6_deployment_actor.csv', 'global_step', ['imag_return', 'eval_reward_short', 'wm_pred_relative_gain'], 'outputs/figures/stage6_deployment_actor_reward.png', 'Stage6 deployment reward', ma_window=5)
+                plot_lines('outputs/metrics/stage6_deployment_actor.csv', 'global_step', ['eval_reward_short'], 'outputs/figures/stage6_deployment_actor_reward.png', 'Stage6 deployment reward', ma_window=5)
     logger.close()
     print({'best_eval_latency': best})
 
