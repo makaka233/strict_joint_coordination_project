@@ -17,7 +17,7 @@ from src.common.metric_logger import MetricLogger
 from src.common.plotter import plot_lines
 from src.common.device import resolve_device, describe_device
 from src.env.core import (
-    build_scenario, flatten_macro_obs, generate_macro_obs, stage_count,
+    build_scenario, flatten_macro_obs, generate_macro_obs, init_workload_process, stage_count,
     generate_scheduler_tasks, greedy_direct_deployment, make_scheduler_obs,
     mutate_deployment, random_feasible_deployment, repair_deployment,
     scheduler_action_costs, scheduler_action_mask, scheduler_target_probs,
@@ -76,10 +76,11 @@ def rollout_macro_with_scheduler(
     scn,
     env_cfg: dict,
     seed_offset: int = 0,
+    workload_state=None,
 ):
     seed = int(env_cfg.get('seed', 0)) + int(seed_offset) + int(macro_obs.sum() * 10) % 100000
     rng = np.random.default_rng(seed)
-    tasks = generate_scheduler_tasks(macro_obs, scn, env_cfg, rng)
+    tasks = generate_scheduler_tasks(macro_obs, scn, env_cfg, rng, workload_state=workload_state)
     comp_assignments = []
     flows = []
     est_node_loads = np.zeros(scn.num_nodes, dtype=np.float32)
@@ -129,10 +130,11 @@ def eval_joint(dep_pol, sched_pol, scn, env_cfg, episodes: int, seed_list: list[
     rows = []
     for seed in seed_list:
         rng = np.random.default_rng(seed)
+        workload_state = init_workload_process(scn, env_cfg, rng)
         for _ in range(episodes):
-            macro = generate_macro_obs(scn, env_cfg, rng)
+            macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
             dep = dep_pol.act(flatten_macro_obs(macro), scn, int(env_cfg['max_replicas']))
-            out = rollout_macro_with_scheduler(macro, dep, sched_pol, scn, env_cfg, seed_offset=0)
+            out = rollout_macro_with_scheduler(macro, dep, sched_pol, scn, env_cfg, seed_offset=0, workload_state=workload_state)
             rows.append({
                 'latency': float(out['mean_window_latency']),
                 'reward': float(out['total_reward']),
@@ -152,11 +154,12 @@ def eval_joint(dep_pol, sched_pol, scn, env_cfg, episodes: int, seed_list: list[
 
 def collect_scheduler_samples(dep_pol, sched_pol, scn, env_cfg, episodes: int, seed: int, temp: float):
     rng = np.random.default_rng(seed)
+    workload_state = init_workload_process(scn, env_cfg, rng)
     samples = []
     for _ in range(episodes):
-        macro = generate_macro_obs(scn, env_cfg, rng)
+        macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
         dep = dep_pol.act(flatten_macro_obs(macro), scn, int(env_cfg['max_replicas']))
-        samples.extend(collect_scheduler_samples_for_macro(macro, dep, sched_pol, scn, env_cfg, temp, seed_offset=0))
+        samples.extend(collect_scheduler_samples_for_macro(macro, dep, sched_pol, scn, env_cfg, temp, seed_offset=0, workload_state=workload_state))
     return samples
 
 
@@ -168,11 +171,12 @@ def collect_scheduler_samples_for_macro(
     env_cfg: dict,
     temp: float,
     seed_offset: int = 0,
+    workload_state=None,
 ):
     seed = int(env_cfg.get('seed', 0)) + int(seed_offset) + int(macro_obs.sum() * 10) % 100000
     rng = np.random.default_rng(seed)
     samples = []
-    tasks = generate_scheduler_tasks(macro_obs, scn, env_cfg, rng)
+    tasks = generate_scheduler_tasks(macro_obs, scn, env_cfg, rng, workload_state=workload_state)
     est_node_loads = np.zeros(scn.num_nodes, dtype=np.float32)
     for task in tasks:
         prev = task['origin']
@@ -411,6 +415,7 @@ def collect_deployment_response_samples(
     sched_obs_dim: int,
 ):
     rng = np.random.default_rng(seed)
+    workload_state = init_workload_process(scn, env_cfg, rng)
     samples = []
     label_gains = []
     reward_gains = []
@@ -423,7 +428,7 @@ def collect_deployment_response_samples(
     eval_seed_offset = int(cfg.get('deployment_response_eval_seed_offset', 2200))
     scheduler_temp = float(cfg.get('scheduler_temp', 0.35))
     for episode_idx in range(episodes):
-        macro = generate_macro_obs(scn, env_cfg, rng)
+        macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
         obs = flatten_macro_obs(macro).astype(np.float32)
         current = dep_pol.act(obs, scn, max_replicas).reshape(-1).astype(np.float32)
         candidates = build_deployment_candidate_pool(macro, current, dep_pol, scn, env_cfg, candidate_count, rng)
@@ -431,7 +436,7 @@ def collect_deployment_response_samples(
         frozen_rewards = []
         for cand in candidates:
             dep = cand.reshape(stage_count(scn), scn.num_nodes)
-            out = rollout_macro_with_scheduler(macro, dep, sched_pol, scn, env_cfg, seed_offset=0)
+            out = rollout_macro_with_scheduler(macro, dep, sched_pol, scn, env_cfg, seed_offset=0, workload_state=workload_state)
             frozen_latencies.append(float(out['mean_window_latency']))
             frozen_rewards.append(float(out['total_reward']))
         frozen_latencies_np = np.asarray(frozen_latencies, dtype=np.float32)
@@ -450,6 +455,7 @@ def collect_deployment_response_samples(
                 env_cfg,
                 scheduler_temp,
                 seed_offset=train_seed_offset + episode_idx * 17 + cand_idx,
+                workload_state=workload_state,
             )
             response_train_stats = train_scheduler_inner(
                 response_samples,
@@ -470,6 +476,7 @@ def collect_deployment_response_samples(
                 scn,
                 env_cfg,
                 seed_offset=eval_seed_offset + episode_idx * 19 + cand_idx,
+                workload_state=workload_state,
             )
             candidate_records[cand_idx] = {
                 'frozen_latency': float(frozen_latencies_np[cand_idx]),
@@ -661,7 +668,8 @@ def main():
     print({'stage': 'joint_stage7', 'device': describe_device(device)})
     scn = build_scenario(env_cfg)
     rng = np.random.default_rng(int(env_cfg['seed']) + 17007)
-    dummy_macro = generate_macro_obs(scn, env_cfg, rng)
+    dummy_workload_state = init_workload_process(scn, env_cfg, rng)
+    dummy_macro = generate_macro_obs(scn, env_cfg, rng, workload_state=dummy_workload_state)
     dummy_dep = greedy_direct_deployment(dummy_macro, scn, int(env_cfg['max_replicas']), env_cfg, rng)
     t = {'origin': 0, 'service': 0, 'stage_compute': [1.0] * scn.service_stages[0], 'stage_data': [1.0] * scn.service_stages[0]}
     sched_obs_dim = make_scheduler_obs(t, 0, 0, dummy_dep, dummy_macro, scn, np.zeros(scn.num_nodes, dtype=np.float32)).shape[0]

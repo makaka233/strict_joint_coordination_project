@@ -1,5 +1,6 @@
 from __future__ import annotations
 import sys
+import copy
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -13,7 +14,7 @@ from src.common.metric_logger import MetricLogger
 from src.common.plotter import plot_lines
 from src.common.device import resolve_device, describe_device
 from src.env.core import (
-    build_scenario, generate_macro_obs, stage_count, greedy_direct_deployment,
+    build_scenario, generate_macro_obs, init_workload_process, stage_count, greedy_direct_deployment,
     random_feasible_deployment, mutate_deployment, evaluate_deployment_with_scheduler,
 )
 from src.agents.scheduler.policy import SchedulerPolicy
@@ -53,11 +54,12 @@ def eval_policy_fixed(policy, scn, env_cfg, cfg, episodes, seed_list):
     vals, rewards = [], []
     for seed in seed_list:
         rng = np.random.default_rng(seed)
+        workload_state = init_workload_process(scn, env_cfg, rng)
         local_vals, local_rewards = [], []
         for _ in range(episodes):
-            macro = generate_macro_obs(scn, env_cfg, rng)
+            macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
             dep = choose_eval_deployment(macro, scn, env_cfg, cfg, rng)
-            out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: policy.act(obs, mask))
+            out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: policy.act(obs, mask), workload_state=workload_state)
             local_vals.append(out['mean_window_latency'])
             local_rewards.append(out['total_reward'])
         vals.append(float(np.mean(local_vals)))
@@ -86,7 +88,45 @@ def phase_weights(phase: str, cfg: dict):
         'planner_tau': float(cfg.get(f'{phase}_planner_tau', cfg.get('planner_tau', 0.30))),
         'rank_margin': float(cfg.get(f'{phase}_rank_margin', cfg.get('rank_margin', 0.08))),
         'gumbel_noise': float(cfg.get(f'{phase}_gumbel_noise', cfg.get('gumbel_noise', 0.0))),
+        'real_teacher_mix': float(cfg.get(f'{phase}_real_teacher_mix', cfg.get('real_teacher_mix', 0.0))),
+        'real_teacher_disagreement_boost': float(cfg.get(f'{phase}_real_teacher_disagreement_boost', cfg.get('real_teacher_disagreement_boost', 0.0))),
     }
+
+
+def blended_phase_weights(step: int, total_steps: int, cfg: dict):
+    a_frac = float(cfg.get('phase_a_frac', 0.08))
+    b_frac = float(cfg.get('phase_b_frac', 0.70))
+    transition_steps = max(0, int(cfg.get('phase_transition_steps', 0)))
+    a_end = int(total_steps * a_frac)
+    b_end = int(total_steps * (a_frac + b_frac))
+    phase = phase_name(step, total_steps, a_frac, b_frac)
+    if transition_steps <= 0:
+        return phase, phase_weights(phase, cfg), phase, phase, 0.0
+
+    def _blend(left: str, right: str, alpha: float):
+        alpha = float(np.clip(alpha, 0.0, 1.0))
+        left_w = phase_weights(left, cfg)
+        right_w = phase_weights(right, cfg)
+        mixed = {k: (1.0 - alpha) * left_w[k] + alpha * right_w[k] for k in left_w}
+        return mixed, left, right, alpha
+
+    if a_end - transition_steps <= step < a_end:
+        alpha = (step - (a_end - transition_steps)) / max(transition_steps, 1)
+        mixed, blend_from, blend_to, blend_alpha = _blend('A', 'B', alpha)
+        return 'A', mixed, blend_from, blend_to, blend_alpha
+    if a_end <= step < a_end + transition_steps:
+        alpha = (step - a_end) / max(transition_steps, 1)
+        mixed, blend_from, blend_to, blend_alpha = _blend('A', 'B', alpha)
+        return 'B', mixed, blend_from, blend_to, blend_alpha
+    if b_end - transition_steps <= step < b_end:
+        alpha = (step - (b_end - transition_steps)) / max(transition_steps, 1)
+        mixed, blend_from, blend_to, blend_alpha = _blend('B', 'C', alpha)
+        return 'B', mixed, blend_from, blend_to, blend_alpha
+    if b_end <= step < b_end + transition_steps:
+        alpha = (step - b_end) / max(transition_steps, 1)
+        mixed, blend_from, blend_to, blend_alpha = _blend('B', 'C', alpha)
+        return 'C', mixed, blend_from, blend_to, blend_alpha
+    return phase, phase_weights(phase, cfg), phase, phase, 0.0
 
 
 def maybe_gumbel(logits: torch.Tensor, scale: float):
@@ -130,6 +170,116 @@ def planner_distribution(pred_cost: torch.Tensor, mask: torch.Tensor, tau: float
     return logits, probs
 
 
+def guidance_from_costs(costs: torch.Tensor, mask: torch.Tensor, tau: float, topk: int):
+    masked_costs = costs + (1.0 - mask) * 1e9
+    logits = -masked_costs / max(tau, 1e-6)
+    logits = logits + (mask - 1.0) * 1e9
+    probs = torch.softmax(logits, dim=1)
+    best_idx = torch.argmin(masked_costs, dim=1)
+    best_cost = masked_costs.gather(1, best_idx[:, None]).squeeze(1)
+    rank_idx = torch.topk(-masked_costs, k=topk, dim=1).indices
+    return probs, best_idx, best_cost, rank_idx, masked_costs
+
+
+def rank_loss_per_sample(
+    perturbed_logits: torch.Tensor,
+    guided_costs: torch.Tensor,
+    best_idx: torch.Tensor,
+    best_cost: torch.Tensor,
+    rank_idx: torch.Tensor,
+    valid_count: torch.Tensor,
+    rank_margin: float,
+):
+    pair_losses = []
+    best_logits = perturbed_logits.gather(1, best_idx[:, None]).squeeze(1)
+    for j in range(1, rank_idx.shape[1]):
+        comp_idx = rank_idx[:, j]
+        comp_logits = perturbed_logits.gather(1, comp_idx[:, None]).squeeze(1)
+        comp_cost = guided_costs.gather(1, comp_idx[:, None]).squeeze(1)
+        adaptive_margin = torch.clamp((comp_cost - best_cost) + rank_margin, min=rank_margin)
+        valid_pair = (valid_count > j).float()
+        pair_losses.append(valid_pair * torch.relu(adaptive_margin - (best_logits - comp_logits)))
+    if not pair_losses:
+        return torch.zeros(guided_costs.shape[0], device=guided_costs.device)
+    pair_stack = torch.stack(pair_losses, dim=1)
+    denom = torch.stack([(valid_count > j).float() for j in range(1, rank_idx.shape[1])], dim=1).sum(dim=1).clamp_min(1.0)
+    return pair_stack.sum(dim=1) / denom
+
+
+def blend_teacher_guidance(
+    wm_probs: torch.Tensor,
+    real_probs: torch.Tensor,
+    wm_best_idx: torch.Tensor,
+    real_best_idx: torch.Tensor,
+    base_mix: float,
+    disagreement_boost: float,
+):
+    agreement = (wm_best_idx == real_best_idx).float()
+    real_mix = torch.full((wm_probs.shape[0], 1), float(base_mix), device=wm_probs.device)
+    if disagreement_boost > 0.0:
+        real_mix = real_mix + disagreement_boost * (1.0 - agreement[:, None])
+    real_mix = real_mix.clamp(0.0, 1.0)
+    teacher_probs = (1.0 - real_mix) * wm_probs + real_mix * real_probs
+    teacher_probs = teacher_probs / teacher_probs.sum(dim=1, keepdim=True).clamp_min(1e-8)
+    return teacher_probs, real_mix.squeeze(1), agreement.mean()
+
+
+def snapshot_training_state(pol: SchedulerPolicy, ema_pol: SchedulerPolicy, opt: torch.optim.Optimizer):
+    return {
+        'policy': {k: v.detach().cpu().clone() for k, v in pol.model.state_dict().items()},
+        'ema_policy': {k: v.detach().cpu().clone() for k, v in ema_pol.model.state_dict().items()},
+        'optimizer': copy.deepcopy(opt.state_dict()),
+    }
+
+
+def restore_training_state(snapshot: dict, pol: SchedulerPolicy, ema_pol: SchedulerPolicy, opt: torch.optim.Optimizer):
+    pol.model.load_state_dict(snapshot['policy'])
+    ema_pol.model.load_state_dict(snapshot['ema_policy'])
+    opt.load_state_dict(snapshot['optimizer'])
+
+
+def scheduler_eval_guard(
+    eval_lat: float,
+    anchor_lat: float,
+    eval_score: float,
+    best_lat: float,
+    best_anchor_lat: float,
+    best_score: float,
+    cfg: dict,
+    global_step: int,
+):
+    accept_short_slack = float(cfg.get('accept_short_latency_slack', 8.0))
+    accept_anchor_slack = float(cfg.get('accept_anchor_latency_slack', 8.0))
+    rollback_short_slack = float(cfg.get('rollback_short_latency_slack', 14.0))
+    rollback_anchor_slack = float(cfg.get('rollback_anchor_latency_slack', 12.0))
+    rollback_score_slack = float(cfg.get('rollback_score_slack', 10.0))
+    guard_start_step = int(cfg.get('eval_accept_start_step', 0))
+
+    short_guard_ok = (not math.isfinite(best_lat)) or (eval_lat <= best_lat + accept_short_slack)
+    anchor_guard_ok = (not math.isfinite(best_anchor_lat)) or (anchor_lat <= best_anchor_lat + accept_anchor_slack)
+    score_improved = eval_score + 1e-9 < best_score
+    accept_checkpoint = score_improved and short_guard_ok and anchor_guard_ok
+
+    severe_short_regression = math.isfinite(best_lat) and (eval_lat > best_lat + rollback_short_slack)
+    severe_anchor_regression = math.isfinite(best_anchor_lat) and (anchor_lat > best_anchor_lat + rollback_anchor_slack)
+    severe_score_regression = math.isfinite(best_score) and (eval_score > best_score + rollback_score_slack)
+    rollback_triggered = (
+        global_step >= guard_start_step
+        and severe_score_regression
+        and (severe_short_regression or severe_anchor_regression)
+    )
+    return {
+        'accept_checkpoint': accept_checkpoint,
+        'score_improved': score_improved,
+        'short_guard_ok': short_guard_ok,
+        'anchor_guard_ok': anchor_guard_ok,
+        'rollback_triggered': rollback_triggered,
+        'severe_short_regression': severe_short_regression,
+        'severe_anchor_regression': severe_anchor_regression,
+        'severe_score_regression': severe_score_regression,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--env-config', required=True)
@@ -167,6 +317,7 @@ def main():
     logger = MetricLogger('outputs/metrics/stage3_scheduler_actor.csv', 'outputs/logs/stage3_scheduler_actor.jsonl')
     best_score = math.inf
     best_latency = math.inf
+    best_anchor_latency = math.inf
     global_step = 0
     bs = int(cfg['batch_size'])
     n = len(replay)
@@ -193,6 +344,7 @@ def main():
     no_improve_evals = 0
     phase_a_frac = float(cfg.get('phase_a_frac', 0.08))
     phase_b_frac = float(cfg.get('phase_b_frac', 0.70))
+    accepted_snapshot = snapshot_training_state(pol, ema_pol, opt)
     for epoch in range(int(cfg['epochs'])):
         for step in range(int(cfg['steps_per_epoch'])):
             idx = torch.randint(0, n, (bs,))
@@ -201,37 +353,41 @@ def main():
             rb = real_costs[idx].to(device)
             vcb = valid_count[idx].to(device)
             logits = pol.model(xb)
-            phase = phase_name(global_step, total_steps, phase_a_frac, phase_b_frac)
-            w = phase_weights(phase, cfg)
+            phase, w, phase_blend_from, phase_blend_to, phase_blend_alpha = blended_phase_weights(global_step, total_steps, cfg)
             logits_masked, probs = masked_probs(logits, mb)
             perturbed = maybe_gumbel(logits_masked, w['gumbel_noise'])
             _, probs = masked_probs(perturbed, mb)
             log_probs = torch.log_softmax(perturbed + (mb - 1.0) * 1e9, dim=1)
+            valid_real = torch.where(mb > 0.5, rb, torch.full_like(rb, 1e9))
+            safe_real = torch.where(mb > 0.5, rb, torch.zeros_like(rb))
+            topk = min(int(cfg.get('rank_topk', 4)), mb.shape[1])
             with torch.no_grad():
-                pred_cost, pred_gap = wm_predict_costs(wm_model, xb, mb, cost_scale)
-                _, plan_probs = planner_distribution(pred_cost, mb, w['planner_tau'])
-                best_idx = torch.argmin(pred_cost, dim=1)
-                best_cost = pred_cost.gather(1, best_idx[:, None]).squeeze(1)
-                topk = min(int(cfg.get('rank_topk', 4)), pred_cost.shape[1])
-                rank_idx = torch.topk(-pred_cost, k=topk, dim=1).indices
-            plan_loss = -(plan_probs * log_probs).sum(dim=1).mean()
+                pred_cost, _ = wm_predict_costs(wm_model, xb, mb, cost_scale)
+                wm_plan_probs, wm_best_idx, wm_best_cost, wm_rank_idx, wm_guided_costs = guidance_from_costs(pred_cost, mb, w['planner_tau'], topk)
+                real_plan_probs, real_best_idx, real_best_cost, real_rank_idx, real_guided_costs = guidance_from_costs(valid_real, mb, w['planner_tau'], topk)
+                teacher_probs, sample_real_mix, wm_real_best_agreement = blend_teacher_guidance(
+                    wm_plan_probs,
+                    real_plan_probs,
+                    wm_best_idx,
+                    real_best_idx,
+                    w['real_teacher_mix'],
+                    w['real_teacher_disagreement_boost'],
+                )
+            plan_loss = -(teacher_probs * log_probs).sum(dim=1).mean()
+            wm_plan_loss = -(wm_plan_probs * log_probs).sum(dim=1).mean()
+            real_plan_loss = -(real_plan_probs * log_probs).sum(dim=1).mean()
             expected_pred_cost_per = (probs * pred_cost).sum(dim=1)
-            relative_cost = (expected_pred_cost_per - best_cost).mean()
-            pair_losses = []
-            best_logits = perturbed.gather(1, best_idx[:, None]).squeeze(1)
-            for j in range(1, rank_idx.shape[1]):
-                comp_idx = rank_idx[:, j]
-                comp_logits = perturbed.gather(1, comp_idx[:, None]).squeeze(1)
-                comp_cost = pred_cost.gather(1, comp_idx[:, None]).squeeze(1)
-                adaptive_margin = torch.clamp((comp_cost - best_cost) + w['rank_margin'], min=w['rank_margin'])
-                valid_pair = (vcb > j).float()
-                pair_losses.append(valid_pair * torch.relu(adaptive_margin - (best_logits - comp_logits)))
-            if pair_losses:
-                pair_stack = torch.stack(pair_losses, dim=1)
-                denom = torch.stack([(vcb > j).float() for j in range(1, rank_idx.shape[1])], dim=1).sum(dim=1).clamp_min(1.0)
-                rank_loss = (pair_stack.sum(dim=1) / denom).mean()
-            else:
-                rank_loss = torch.tensor(0.0, device=device)
+            wm_relative_cost_per = expected_pred_cost_per - wm_best_cost
+            expected_real = (probs * safe_real).sum(dim=1)
+            real_relative_cost_per = expected_real - real_best_cost
+            relative_cost = (((1.0 - sample_real_mix) * wm_relative_cost_per) + (sample_real_mix * real_relative_cost_per)).mean()
+            wm_relative_cost = wm_relative_cost_per.mean()
+            real_relative_cost = real_relative_cost_per.mean()
+            wm_rank_loss_per = rank_loss_per_sample(perturbed, wm_guided_costs, wm_best_idx, wm_best_cost, wm_rank_idx, vcb, w['rank_margin'])
+            real_rank_loss_per = rank_loss_per_sample(perturbed, real_guided_costs, real_best_idx, real_best_cost, real_rank_idx, vcb, w['rank_margin'])
+            rank_loss = (((1.0 - sample_real_mix) * wm_rank_loss_per) + (sample_real_mix * real_rank_loss_per)).mean()
+            wm_rank_loss = wm_rank_loss_per.mean()
+            real_rank_loss = real_rank_loss_per.mean()
             entropy = -(probs * torch.log(probs + 1e-8)).sum(dim=1).mean()
             entropy_pen = torch.relu(torch.tensor(w['entropy_floor'], device=device) - entropy)
             actor_loss = (
@@ -241,11 +397,7 @@ def main():
                 + w['entropy_floor_coef'] * entropy_pen
                 - w['entropy_coef'] * entropy
             )
-            # log-only oracle metrics on true costs
-            valid_real = rb + (1.0 - mb) * 1e9
-            best_real = torch.min(valid_real, dim=1).values
-            expected_real = (probs * valid_real).sum(dim=1)
-            critic_loss = nn.functional.mse_loss(expected_real, best_real)
+            critic_loss = nn.functional.mse_loss(expected_real, real_best_cost)
             opt.zero_grad()
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(pol.model.parameters(), float(cfg.get('grad_clip', 1.0)))
@@ -257,19 +409,31 @@ def main():
                 'epoch': epoch,
                 'step_in_epoch': step,
                 'phase': phase,
+                'phase_blend_from': phase_blend_from,
+                'phase_blend_to': phase_blend_to,
+                'phase_blend_alpha': float(phase_blend_alpha),
                 'actor_loss': float(actor_loss.item()),
                 'critic_loss': float(critic_loss.item()),
                 'imag_return': float(-expected_pred_cost_per.mean().item() * 1000.0),
                 'entropy': float(entropy.item()),
                 'plan_loss': float(plan_loss.item()),
+                'wm_plan_loss': float(wm_plan_loss.item()),
+                'real_plan_loss': float(real_plan_loss.item()),
                 'expected_cost': float(expected_pred_cost_per.mean().item()),
                 'relative_cost': float(relative_cost.item()),
+                'wm_relative_cost': float(wm_relative_cost.item()),
+                'real_relative_cost': float(real_relative_cost.item()),
                 'margin_loss': float(rank_loss.item()),
-                'planner_entropy': float((-(plan_probs * torch.log(plan_probs + 1e-8)).sum(dim=1).mean()).item()),
-                'actor_vs_planner_agreement': float((probs.argmax(dim=1) == best_idx).float().mean().item()),
+                'wm_rank_loss': float(wm_rank_loss.item()),
+                'real_rank_loss': float(real_rank_loss.item()),
+                'planner_entropy': float((-(teacher_probs * torch.log(teacher_probs + 1e-8)).sum(dim=1).mean()).item()),
+                'actor_vs_planner_agreement': float((probs.argmax(dim=1) == wm_best_idx).float().mean().item()),
+                'actor_vs_real_agreement': float((probs.argmax(dim=1) == real_best_idx).float().mean().item()),
+                'wm_real_best_agreement': float(wm_real_best_agreement.item()),
+                'real_teacher_mix': float(sample_real_mix.mean().item()),
                 'valid_action_count_mean': float(vcb.mean().item()),
                 'real_expected_cost': float(expected_real.mean().item()),
-                'real_best_cost': float(best_real.mean().item()),
+                'real_best_cost': float(real_best_cost.mean().item()),
                 'lr': float(opt.param_groups[0]['lr']),
                 'plan_weight': w['plan_weight'],
                 'rank_weight': w['rank_weight'],
@@ -287,6 +451,7 @@ def main():
                     'global_step': global_step,
                     'epoch': epoch,
                     'step_in_epoch': step,
+                    'phase': phase,
                     'eval_latency_short': eval_lat,
                     'eval_reward_short': eval_reward,
                     'anchor_eval_latency': anchor_lat,
@@ -294,31 +459,79 @@ def main():
                     'eval_score': eval_score,
                     'best_eval_latency_so_far': min(best_latency, eval_lat),
                     'best_eval_score_so_far': min(best_score, eval_score),
-                    'is_best_checkpoint': float(eval_score < best_score),
                 }
+                guard = scheduler_eval_guard(
+                    eval_lat=eval_lat,
+                    anchor_lat=anchor_lat,
+                    eval_score=eval_score,
+                    best_lat=best_latency,
+                    best_anchor_lat=best_anchor_latency,
+                    best_score=best_score,
+                    cfg=cfg,
+                    global_step=global_step,
+                )
+                eval_row.update({
+                    'score_improved': float(guard['score_improved']),
+                    'short_guard_ok': float(guard['short_guard_ok']),
+                    'anchor_guard_ok': float(guard['anchor_guard_ok']),
+                    'rollback_triggered': float(guard['rollback_triggered']),
+                    'is_best_checkpoint': float(guard['accept_checkpoint']),
+                })
                 logger.log(eval_row)
-                if eval_score + 1e-9 < best_score:
+                if guard['accept_checkpoint']:
                     best_score = eval_score
                     best_latency = eval_lat
+                    best_anchor_latency = anchor_lat
+                    accepted_snapshot = snapshot_training_state(pol, ema_pol, opt)
                     no_improve_evals = 0
-                    save_checkpoint(ema_pol.model, args.out, {'best_eval_latency': best_latency, 'best_eval_score': best_score, 'obs_dim': obs.shape[1], 'num_nodes': scn.num_nodes, 'ema_decay': ema_decay})
-                    print({'best_eval_latency': best_latency, 'best_eval_score': best_score, 'global_step': global_step})
+                    save_checkpoint(ema_pol.model, args.out, {
+                        'best_eval_latency': best_latency,
+                        'best_eval_score': best_score,
+                        'best_anchor_latency': best_anchor_latency,
+                        'obs_dim': obs.shape[1],
+                        'num_nodes': scn.num_nodes,
+                        'ema_decay': ema_decay,
+                    })
+                    print({
+                        'best_eval_latency': best_latency,
+                        'best_anchor_latency': best_anchor_latency,
+                        'best_eval_score': best_score,
+                        'global_step': global_step,
+                    })
                 else:
                     no_improve_evals += 1
+                    if guard['rollback_triggered']:
+                        restore_training_state(accepted_snapshot, pol, ema_pol, opt)
+                        print({
+                            'rollback': True,
+                            'global_step': global_step,
+                            'eval_latency_short': eval_lat,
+                            'anchor_eval_latency': anchor_lat,
+                            'eval_score': eval_score,
+                            'best_eval_latency': best_latency,
+                            'best_anchor_latency': best_anchor_latency,
+                            'best_eval_score': best_score,
+                        })
                 if global_step >= min_steps_before_early_stop and no_improve_evals >= patience_evals and phase == 'C':
-                    print({'early_stop': True, 'global_step': global_step, 'best_eval_latency': best_latency, 'best_eval_score': best_score})
+                    print({
+                        'early_stop': True,
+                        'global_step': global_step,
+                        'best_eval_latency': best_latency,
+                        'best_anchor_latency': best_anchor_latency,
+                        'best_eval_score': best_score,
+                    })
                     logger.flush()
                     plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['actor_loss', 'plan_loss', 'expected_cost', 'relative_cost', 'margin_loss', 'entropy'], 'outputs/figures/stage3_scheduler_actor_train.png', 'Stage3 scheduler actor train', ma_window=50)
                     plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_latency_short', 'anchor_eval_latency'], 'outputs/figures/stage3_scheduler_actor_eval_latency.png', 'Stage3 scheduler eval latency', ma_window=5)
                     plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
-                    print({'best_eval_latency': best_latency, 'best_eval_score': best_score})
+                    print({'best_eval_latency': best_latency, 'best_anchor_latency': best_anchor_latency, 'best_eval_score': best_score})
                     return
             if global_step % plot_every == 0:
                 plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['actor_loss', 'plan_loss', 'expected_cost', 'relative_cost', 'margin_loss', 'entropy'], 'outputs/figures/stage3_scheduler_actor_train.png', 'Stage3 scheduler actor train', ma_window=25)
                 plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_latency_short', 'anchor_eval_latency'], 'outputs/figures/stage3_scheduler_actor_eval_latency.png', 'Stage3 scheduler eval latency', ma_window=5)
                 plot_lines('outputs/metrics/stage3_scheduler_actor.csv', 'global_step', ['eval_reward_short', 'anchor_eval_reward'], 'outputs/figures/stage3_scheduler_actor_reward.png', 'Stage3 scheduler reward', ma_window=5)
     logger.flush()
-    print({'best_eval_latency': best_latency, 'best_eval_score': best_score})
+    print({'best_eval_latency': best_latency, 'best_anchor_latency': best_anchor_latency, 'best_eval_score': best_score})
 
 if __name__ == '__main__':
     main()

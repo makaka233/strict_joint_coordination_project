@@ -1,0 +1,61 @@
+seed: 11
+num_nodes: 6
+service_stages: [2, 3, 2, 3]
+stage_memory_base: 9.0
+stage_storage_base: 12.0
+node_memory: 72.0
+node_storage: 96.0
+node_compute: 180.0
+bandwidth: 40.0
+
+# Kept as a calibration target for average workload.
+scheduler_num_tasks: 48
+macro_demand_base: 18.0
+macro_demand_volatility: 8.0
+compute_base: 20.0
+data_base: 7.0
+max_replicas: 3
+
+deployment_candidate_topk: 4
+deployment_replica_min: 1
+deployment_replica_ratio_2: 1.00
+deployment_replica_ratio_3: 1.35
+deployment_extra_replica_prob: 0.15
+deployment_demand_weight: 1.0
+deployment_compute_weight: 0.25
+deployment_resource_weight: 0.35
+deployment_diversity_bias: 0.12
+deployment_noise: 0.05
+
+task_generation_mode: user_arrival
+arrival_process: bernoulli
+users_per_node: 18
+slots_per_window: 10
+
+# Smooth, bounded window-level load variation. The total task count changes,
+# but remains in a moderate band instead of swinging from near-zero to extreme spikes.
+window_load_initial_factor: 1.0
+window_load_min_factor: 0.82
+window_load_max_factor: 1.22
+window_load_revert: 0.42
+window_load_sigma: 0.03
+window_load_wave_amplitude: 0.08
+window_load_wave_period: 10
+
+node_load_min_factor: 0.88
+node_load_max_factor: 1.16
+node_load_revert: 0.45
+node_load_sigma: 0.025
+node_load_wave_amplitude: 0.06
+
+service_mix_min_factor: 0.90
+service_mix_max_factor: 1.12
+service_mix_revert: 0.45
+service_mix_sigma: 0.02
+service_mix_wave_amplitude: 0.05
+
+macro_stage_noise_sigma: 0.06
+slot_arrival_wave_amplitude: 0.05
+bernoulli_arrival_prob_cap: 0.18
+task_size_probs: [0.50, 0.35, 0.15]
+task_size_multipliers: [0.90, 1.00, 1.12]

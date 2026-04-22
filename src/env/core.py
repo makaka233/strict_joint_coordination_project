@@ -18,6 +18,15 @@ class Scenario:
     stage_local_idx: list[int]
 
 
+@dataclass
+class WorkloadProcessState:
+    load_factor: float
+    node_bias: np.ndarray
+    service_bias: np.ndarray
+    wave_phase: float
+    window_index: int = 0
+
+
 def build_scenario(cfg: dict[str, Any]) -> Scenario:
     num_nodes = int(cfg['num_nodes'])
     service_stages = list(cfg['service_stages'])
@@ -112,6 +121,135 @@ def _cfg(cfg: dict[str, Any] | None, key: str, default: float | int):
     if cfg is None:
         return default
     return cfg.get(key, default)
+
+
+def _normalize_positive(vals: np.ndarray) -> np.ndarray:
+    arr = np.maximum(np.asarray(vals, dtype=np.float32), 1e-6)
+    return arr / max(float(arr.sum()), 1e-6)
+
+
+def _bounded_walk_step(current: np.ndarray | float, target: np.ndarray | float, rng: np.random.Generator, sigma: float, revert: float, low: float, high: float):
+    updated = np.asarray(current, dtype=np.float32) + float(revert) * (np.asarray(target, dtype=np.float32) - np.asarray(current, dtype=np.float32))
+    updated = updated + float(sigma) * rng.standard_normal(np.asarray(updated).shape).astype(np.float32)
+    return np.clip(updated, float(low), float(high)).astype(np.float32)
+
+
+def _task_generation_mode(cfg: dict[str, Any]) -> str:
+    return str(cfg.get('task_generation_mode', 'fixed_window')).strip().lower()
+
+
+def init_workload_process(scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator) -> WorkloadProcessState:
+    return WorkloadProcessState(
+        load_factor=float(np.clip(
+            float(cfg.get('window_load_initial_factor', 1.0)),
+            float(cfg.get('window_load_min_factor', 0.75)),
+            float(cfg.get('window_load_max_factor', 1.35)),
+        )),
+        node_bias=np.ones(scn.num_nodes, dtype=np.float32),
+        service_bias=np.ones(len(scn.service_stages), dtype=np.float32),
+        wave_phase=float(rng.uniform(0.0, 2.0 * np.pi)),
+        window_index=0,
+    )
+
+
+def _advance_workload_process(state: WorkloadProcessState, scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator) -> WorkloadProcessState:
+    if _task_generation_mode(cfg) != 'user_arrival':
+        return state
+    period = max(int(cfg.get('window_load_wave_period', 8)), 1)
+    phase_step = (2.0 * np.pi) / float(period)
+    state.wave_phase = float(state.wave_phase + phase_step)
+    state.window_index += 1
+    load_target = 1.0 + float(cfg.get('window_load_wave_amplitude', 0.10)) * np.sin(state.wave_phase)
+    state.load_factor = float(_bounded_walk_step(
+        state.load_factor,
+        load_target,
+        rng,
+        sigma=float(cfg.get('window_load_sigma', 0.05)),
+        revert=float(cfg.get('window_load_revert', 0.35)),
+        low=float(cfg.get('window_load_min_factor', 0.75)),
+        high=float(cfg.get('window_load_max_factor', 1.35)),
+    ))
+    if scn.num_nodes > 0:
+        node_offsets = np.linspace(0.0, np.pi, scn.num_nodes, endpoint=False, dtype=np.float32)
+        node_target = 1.0 + float(cfg.get('node_load_wave_amplitude', 0.08)) * np.sin(state.wave_phase + node_offsets)
+        state.node_bias = _bounded_walk_step(
+            state.node_bias,
+            node_target,
+            rng,
+            sigma=float(cfg.get('node_load_sigma', 0.04)),
+            revert=float(cfg.get('node_load_revert', 0.40)),
+            low=float(cfg.get('node_load_min_factor', 0.82)),
+            high=float(cfg.get('node_load_max_factor', 1.20)),
+        )
+    if len(scn.service_stages) > 0:
+        service_offsets = np.linspace(0.0, np.pi, len(scn.service_stages), endpoint=False, dtype=np.float32)
+        service_target = 1.0 + float(cfg.get('service_mix_wave_amplitude', 0.06)) * np.cos(state.wave_phase + service_offsets)
+        state.service_bias = _bounded_walk_step(
+            state.service_bias,
+            service_target,
+            rng,
+            sigma=float(cfg.get('service_mix_sigma', 0.03)),
+            revert=float(cfg.get('service_mix_revert', 0.45)),
+            low=float(cfg.get('service_mix_min_factor', 0.85)),
+            high=float(cfg.get('service_mix_max_factor', 1.18)),
+        )
+    return state
+
+
+def _base_user_arrival_rate(scn: Scenario, cfg: dict[str, Any]) -> float:
+    users_per_node = max(int(cfg.get('users_per_node', 16)), 1)
+    slots_per_window = max(int(cfg.get('slots_per_window', 8)), 1)
+    if 'user_arrival_rate' in cfg:
+        base = float(cfg['user_arrival_rate'])
+    else:
+        baseline_tasks = float(cfg.get('scheduler_num_tasks', 32))
+        base = baseline_tasks / max(float(scn.num_nodes * users_per_node * slots_per_window), 1.0)
+    if str(cfg.get('arrival_process', 'bernoulli')).lower() == 'bernoulli':
+        base = min(base, float(cfg.get('user_arrival_rate_cap', 0.30)))
+    return max(base, 1e-4)
+
+
+def _base_service_mix(scn: Scenario, cfg: dict[str, Any]) -> np.ndarray:
+    raw = cfg.get('service_mix')
+    if isinstance(raw, list) and len(raw) == len(scn.service_stages):
+        return _normalize_positive(np.asarray(raw, dtype=np.float32))
+    default = np.asarray(scn.service_stages, dtype=np.float32)
+    return _normalize_positive(default)
+
+
+def _current_service_mix(scn: Scenario, cfg: dict[str, Any], state: WorkloadProcessState | None) -> np.ndarray:
+    base = _base_service_mix(scn, cfg)
+    if state is None:
+        return base
+    return _normalize_positive(base * np.maximum(state.service_bias, 1e-4))
+
+
+def _macro_task_scale(scn: Scenario, cfg: dict[str, Any], service_mix: np.ndarray) -> float:
+    if 'macro_task_scale' in cfg:
+        return float(cfg['macro_task_scale'])
+    users_per_node = max(int(cfg.get('users_per_node', 16)), 1)
+    slots_per_window = max(int(cfg.get('slots_per_window', 8)), 1)
+    expected_node_tasks = users_per_node * slots_per_window * _base_user_arrival_rate(scn, cfg)
+    macro_base = float(cfg.get('macro_demand_base', 16.0))
+    mean_service_share = max(float(service_mix.mean()), 1e-6)
+    return macro_base / max(expected_node_tasks * mean_service_share, 1e-6)
+
+
+def _node_service_task_budget(scn: Scenario, cfg: dict[str, Any], state: WorkloadProcessState | None) -> tuple[np.ndarray, np.ndarray]:
+    service_mix = _current_service_mix(scn, cfg, state)
+    users_per_node = max(int(cfg.get('users_per_node', 16)), 1)
+    slots_per_window = max(int(cfg.get('slots_per_window', 8)), 1)
+    base_rate = _base_user_arrival_rate(scn, cfg)
+    if state is None:
+        node_bias = np.ones(scn.num_nodes, dtype=np.float32)
+        load_factor = 1.0
+    else:
+        node_bias = np.asarray(state.node_bias, dtype=np.float32)
+        load_factor = float(state.load_factor)
+    node_tasks = users_per_node * slots_per_window * base_rate * load_factor * np.maximum(node_bias, 1e-4)
+    max_node_tasks = float(cfg.get('max_expected_tasks_per_node', users_per_node * slots_per_window))
+    node_tasks = np.clip(node_tasks, 0.0, max_node_tasks).astype(np.float32)
+    return node_tasks[:, None] * service_mix[None, :], service_mix
 
 
 def _stage_candidate_scores(s: int, macro_obs: np.ndarray, scn: Scenario, rem_mem: np.ndarray, rem_sto: np.ndarray, cfg: dict[str, Any] | None, rng: np.random.Generator | None) -> np.ndarray:
@@ -242,9 +380,30 @@ def mutate_deployment(base: np.ndarray, macro_obs: np.ndarray, scn: Scenario, ma
     return repair_deployment(x, scn, max_replicas, scores=scores)
 
 
-def generate_macro_obs(scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator) -> np.ndarray:
+def generate_macro_obs(scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator, workload_state: WorkloadProcessState | None = None) -> np.ndarray:
     s_count = stage_count(scn)
     obs = np.zeros((scn.num_nodes + 1, s_count), dtype=np.float32)
+    if _task_generation_mode(cfg) == 'user_arrival':
+        state = workload_state if workload_state is not None else init_workload_process(scn, cfg, rng)
+        _advance_workload_process(state, scn, cfg, rng)
+        node_service_tasks, service_mix = _node_service_task_budget(scn, cfg, state)
+        macro_scale = _macro_task_scale(scn, cfg, service_mix)
+        stage_noise_sigma = float(cfg.get(
+            'macro_stage_noise_sigma',
+            min(0.25, float(cfg.get('macro_demand_volatility', 8.0)) / max(float(cfg.get('macro_demand_base', 16.0)), 1.0)),
+        ))
+        for s in range(s_count):
+            service = scn.stage_to_service[s]
+            local_idx = scn.stage_local_idx[s]
+            stage_weight = 1.0 + 0.12 * float(local_idx) + 0.06 * float(service)
+            stage_noise = np.clip(
+                1.0 + stage_noise_sigma * rng.standard_normal(scn.num_nodes).astype(np.float32),
+                0.70,
+                1.30,
+            )
+            obs[:-1, s] = np.maximum(0.0, macro_scale * node_service_tasks[:, service] * stage_weight * stage_noise)
+        obs[-1] = obs[:-1].sum(axis=0)
+        return obs
     base = float(cfg.get('macro_demand_base', 16.0))
     volatility = float(cfg.get('macro_demand_volatility', 8.0))
     node_hot = rng.integers(0, scn.num_nodes)
@@ -261,7 +420,69 @@ def flatten_macro_obs(obs: np.ndarray) -> np.ndarray:
     return obs.reshape(-1).astype(np.float32)
 
 
-def generate_scheduler_tasks(macro_obs: np.ndarray, scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator):
+def _sample_task_size_multiplier(cfg: dict[str, Any], rng: np.random.Generator) -> float:
+    probs = cfg.get('task_size_probs', [0.55, 0.30, 0.15])
+    multipliers = cfg.get('task_size_multipliers', [0.85, 1.0, 1.20])
+    if not isinstance(probs, list) or not isinstance(multipliers, list) or len(probs) != len(multipliers) or len(probs) == 0:
+        return 1.0
+    p = _normalize_positive(np.asarray(probs, dtype=np.float32))
+    m = np.asarray(multipliers, dtype=np.float32)
+    idx = int(rng.choice(np.arange(len(m)), p=p))
+    return float(max(m[idx], 0.25))
+
+
+def _service_probs_for_node(macro_obs: np.ndarray, scn: Scenario, node_idx: int) -> np.ndarray:
+    vals = []
+    offset = 0
+    for count in scn.service_stages:
+        vals.append(float(np.mean(macro_obs[node_idx, offset:offset + count])))
+        offset += count
+    return _normalize_positive(np.asarray(vals, dtype=np.float32))
+
+
+def generate_scheduler_tasks(macro_obs: np.ndarray, scn: Scenario, cfg: dict[str, Any], rng: np.random.Generator, workload_state: WorkloadProcessState | None = None):
+    if _task_generation_mode(cfg) == 'user_arrival':
+        state = workload_state if workload_state is not None else init_workload_process(scn, cfg, rng)
+        users_per_node = max(int(cfg.get('users_per_node', 16)), 1)
+        slots_per_window = max(int(cfg.get('slots_per_window', 8)), 1)
+        arrival_process = str(cfg.get('arrival_process', 'bernoulli')).lower()
+        base_rate = _base_user_arrival_rate(scn, cfg)
+        slot_wave_amp = float(cfg.get('slot_arrival_wave_amplitude', 0.06))
+        max_arrivals_per_user_slot = max(int(cfg.get('max_arrivals_per_user_slot', 2)), 1)
+        tasks = []
+        for n in range(scn.num_nodes):
+            service_probs = _service_probs_for_node(macro_obs, scn, n)
+            node_bias = float(state.node_bias[n]) if workload_state is not None else 1.0
+            for slot in range(slots_per_window):
+                if slots_per_window <= 1:
+                    slot_factor = 1.0
+                else:
+                    slot_phase = float(slot) / float(slots_per_window)
+                    slot_factor = 1.0 + slot_wave_amp * np.sin((2.0 * np.pi * slot_phase) + (state.wave_phase if workload_state is not None else 0.0))
+                arrival_rate = base_rate * (float(state.load_factor) if workload_state is not None else 1.0) * node_bias * max(slot_factor, 0.2)
+                if arrival_process == 'poisson':
+                    arrival_rate = max(arrival_rate, 0.0)
+                else:
+                    arrival_rate = min(max(arrival_rate, 0.0), float(cfg.get('bernoulli_arrival_prob_cap', 0.35)))
+                for _ in range(users_per_node):
+                    if arrival_process == 'poisson':
+                        arrivals = int(min(rng.poisson(arrival_rate), max_arrivals_per_user_slot))
+                    else:
+                        arrivals = 1 if rng.random() < arrival_rate else 0
+                    for _ in range(arrivals):
+                        service = int(rng.choice(np.arange(len(scn.service_stages)), p=service_probs))
+                        compute_base = float(cfg.get('compute_base', 18.0))
+                        data_base = float(cfg.get('data_base', 6.0))
+                        size_scale = _sample_task_size_multiplier(cfg, rng)
+                        stage_count_local = scn.service_stages[service]
+                        task = {
+                            'origin': n,
+                            'service': service,
+                            'stage_compute': [max(1.0, compute_base * size_scale * (1.0 + 0.2 * j + 0.1 * service) * (0.8 + 0.4 * rng.random())) for j in range(stage_count_local)],
+                            'stage_data': [max(0.5, data_base * size_scale * (1.0 + 0.1 * j + 0.1 * service) * (0.8 + 0.4 * rng.random())) for j in range(stage_count_local)],
+                        }
+                        tasks.append(task)
+        return tasks
     num_tasks = int(cfg.get('scheduler_num_tasks', 32))
     s_count = stage_count(scn)
     weights = macro_obs[:-1].sum(axis=0)
@@ -345,9 +566,9 @@ def greedy_scheduler_action(obs: np.ndarray, mask: np.ndarray, task: dict, local
     return int(valid[np.argmin(costs[valid])])
 
 
-def evaluate_deployment_with_scheduler(macro_obs: np.ndarray, deployment: np.ndarray, scn: Scenario, cfg: dict[str, Any], scheduler_policy) -> dict:
+def evaluate_deployment_with_scheduler(macro_obs: np.ndarray, deployment: np.ndarray, scn: Scenario, cfg: dict[str, Any], scheduler_policy, workload_state: WorkloadProcessState | None = None) -> dict:
     rng = np.random.default_rng(int(cfg.get('seed', 0)) + int(macro_obs.sum() * 10) % 100000)
-    tasks = generate_scheduler_tasks(macro_obs, scn, cfg, rng)
+    tasks = generate_scheduler_tasks(macro_obs, scn, cfg, rng, workload_state=workload_state)
     comp_assignments = []
     flows = []
     est_node_loads = np.zeros(scn.num_nodes, dtype=np.float32)

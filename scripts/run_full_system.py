@@ -9,7 +9,7 @@ from src.common.config import load_yaml
 from src.common.seed import set_seed
 from src.common.plotter import plot_lines
 from src.common.device import resolve_device, describe_device
-from src.env.core import build_scenario, generate_macro_obs, flatten_macro_obs, evaluate_deployment_with_scheduler, greedy_direct_deployment, stage_count, make_scheduler_obs
+from src.env.core import build_scenario, generate_macro_obs, flatten_macro_obs, init_workload_process, evaluate_deployment_with_scheduler, greedy_direct_deployment, stage_count, make_scheduler_obs
 from scripts._shared import load_scheduler_policy, load_deployment_policy
 
 
@@ -36,7 +36,8 @@ def main():
     print({'stage': 'full_eval', 'device': describe_device(device)})
     scn = build_scenario(env_cfg)
     rng = np.random.default_rng(int(env_cfg['seed']) + 999)
-    dummy_macro = generate_macro_obs(scn, env_cfg, rng)
+    dummy_workload_state = init_workload_process(scn, env_cfg, rng)
+    dummy_macro = generate_macro_obs(scn, env_cfg, rng, workload_state=dummy_workload_state)
     dummy_dep = greedy_direct_deployment(dummy_macro, scn, int(env_cfg['max_replicas']))
     t = {'origin': 0, 'service': 0, 'stage_compute': [1.0]*scn.service_stages[0], 'stage_data': [1.0]*scn.service_stages[0]}
     sched_obs_dim = make_scheduler_obs(t, 0, 0, dummy_dep, dummy_macro, scn, np.zeros(scn.num_nodes, dtype=np.float32)).shape[0]
@@ -50,11 +51,12 @@ def main():
     for seed_idx in range(int(args.seed_count)):
         seed = int(seed_base + seed_idx)
         rng = np.random.default_rng(seed)
+        workload_state = init_workload_process(scn, env_cfg, rng)
         prev_dep = dummy_dep.copy()
         for ep in range(args.episodes):
-            macro = generate_macro_obs(scn, env_cfg, rng)
+            macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
             dep = deployer.act(flatten_macro_obs(macro), scn, int(env_cfg['max_replicas']))
-            out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: scheduler.act(obs, mask))
+            out = evaluate_deployment_with_scheduler(macro, dep, scn, env_cfg, lambda obs, mask, task, local_stage, prev: scheduler.act(obs, mask), workload_state=workload_state)
             rows.append({
                 'seed': seed,
                 'seed_index': seed_idx,

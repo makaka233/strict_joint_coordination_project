@@ -10,7 +10,7 @@ from src.common.config import load_yaml
 from src.common.seed import set_seed
 from src.common.metric_logger import MetricLogger
 from src.env.core import (
-    build_scenario, generate_macro_obs, generate_scheduler_tasks, make_scheduler_obs,
+    build_scenario, generate_macro_obs, generate_scheduler_tasks, init_workload_process, make_scheduler_obs,
     scheduler_action_mask, greedy_scheduler_action, greedy_direct_deployment,
     random_feasible_deployment, mutate_deployment, scheduler_action_costs,
 )
@@ -48,6 +48,7 @@ def main():
     set_seed(int(env_cfg['seed']))
     rng = np.random.default_rng(int(env_cfg['seed']))
     scn = build_scenario(env_cfg)
+    workload_state = init_workload_process(scn, env_cfg, rng)
     replay = []
     logger = MetricLogger('outputs/metrics/stage1_scheduler_collect.csv', 'outputs/logs/stage1_scheduler_collect.jsonl')
     step = 0
@@ -55,10 +56,10 @@ def main():
     source_counts = {'heuristic': 0, 'random': 0, 'mutate': 0}
     mean_best_costs, mean_gap_costs = [], []
     for ep in range(int(collect_cfg['episodes'])):
-        macro = generate_macro_obs(scn, env_cfg, rng)
+        macro = generate_macro_obs(scn, env_cfg, rng, workload_state=workload_state)
         dep, dep_src = choose_deployment(macro, scn, env_cfg, collect_cfg, rng)
         source_counts[dep_src] += 1
-        tasks = generate_scheduler_tasks(macro, scn, env_cfg, rng)
+        tasks = generate_scheduler_tasks(macro, scn, env_cfg, rng, workload_state=workload_state)
         est = np.zeros(scn.num_nodes, dtype=np.float32)
         for t in tasks:
             prev = t['origin']
